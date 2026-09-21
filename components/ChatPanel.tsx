@@ -1,11 +1,18 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import {
+    FormEvent,
+    useEffect,
+    useRef,
+    useState,
+} from "react";
 import {
     MessageCircle,
     Send,
     X,
 } from "lucide-react";
+
+import { supabase, type ChatMessage } from "@/lib/supabase";
 
 type Gender =
     | "Male"
@@ -13,12 +20,8 @@ type Gender =
     | "Non-binary"
     | "Prefer not to say";
 
-type Message = {
-    id: number;
-    nickname: string;
-    text: string;
-    own?: boolean;
-};
+// Keep the client display in sync with the DB's rolling window.
+const MAX_MESSAGES = 100;
 
 type ChatPanelProps = {
     onClose: () => void;
@@ -41,23 +44,108 @@ export default function ChatPanel({
         useState("");
 
     const [messages, setMessages] =
-        useState<Message[]>([
-            {
-                id: 1,
-                nickname: "MusicFan",
-                text: "Hey everyone 👋",
-            },
-            {
-                id: 2,
-                nickname: "Rahul",
-                text: "This song is 🔥",
-            },
-            {
-                id: 3,
-                nickname: "Priya",
-                text: "Love this one ❤️",
-            },
-        ]);
+        useState<ChatMessage[]>([]);
+
+    const [sending, setSending] =
+        useState(false);
+
+    const [error, setError] =
+        useState<string | null>(null);
+
+    const scrollRef =
+        useRef<HTMLDivElement | null>(null);
+
+
+    // ==========================================
+    // LOAD HISTORY + REALTIME SUBSCRIPTION
+    // ==========================================
+
+    useEffect(() => {
+        if (!hasJoined) return;
+
+        let active = true;
+
+        // Newest 100, returned oldest -> newest for display.
+        const loadHistory = async () => {
+            const { data, error } = await supabase
+                .from("messages")
+                .select("*")
+                .order("created_at", {
+                    ascending: false,
+                })
+                .limit(MAX_MESSAGES);
+
+            if (!active) return;
+
+            if (error) {
+                setError("Could not load messages.");
+                return;
+            }
+
+            setMessages(
+                (data ?? []).reverse()
+            );
+        };
+
+        loadHistory();
+
+        // Live inserts + trim deletes for everyone.
+        const channel = supabase
+            .channel("public:messages")
+            .on(
+                "postgres_changes",
+                {
+                    event: "INSERT",
+                    schema: "public",
+                    table: "messages",
+                },
+                (payload) => {
+                    setMessages((current) =>
+                        [
+                            ...current,
+                            payload.new as ChatMessage,
+                        ].slice(-MAX_MESSAGES)
+                    );
+                }
+            )
+            .on(
+                "postgres_changes",
+                {
+                    event: "DELETE",
+                    schema: "public",
+                    table: "messages",
+                },
+                (payload) => {
+                    const removed =
+                        payload.old as Partial<ChatMessage>;
+
+                    setMessages((current) =>
+                        current.filter(
+                            (item) =>
+                                item.id !== removed.id
+                        )
+                    );
+                }
+            )
+            .subscribe();
+
+        return () => {
+            active = false;
+            supabase.removeChannel(channel);
+        };
+    }, [hasJoined]);
+
+
+    // ==========================================
+    // AUTO-SCROLL TO NEWEST MESSAGE
+    // ==========================================
+
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el) {
+            el.scrollTop = el.scrollHeight;
+        }
+    }, [messages]);
 
 
     // ==========================================
@@ -89,7 +177,7 @@ export default function ChatPanel({
     // SEND MESSAGE
     // ==========================================
 
-    const sendMessage = (
+    const sendMessage = async (
         event: FormEvent<HTMLFormElement>
     ) => {
 
@@ -100,22 +188,33 @@ export default function ChatPanel({
 
         if (
             !cleanMessage ||
-            !hasJoined
+            !hasJoined ||
+            sending
         ) {
             return;
         }
 
-        setMessages((current) => [
-            ...current,
-            {
-                id: Date.now(),
-                nickname,
-                text: cleanMessage,
-                own: true,
-            },
-        ]);
+        setSending(true);
+        setError(null);
 
+        // Clear the input immediately; the realtime
+        // subscription will echo the saved row back.
         setMessage("");
+
+        const { error } = await supabase
+            .from("messages")
+            .insert({
+                nickname,
+                gender: gender || null,
+                text: cleanMessage,
+            });
+
+        if (error) {
+            setError("Message failed to send.");
+            setMessage(cleanMessage);
+        }
+
+        setSending(false);
     };
 
 
@@ -496,6 +595,7 @@ export default function ChatPanel({
                     {/* MESSAGES */}
 
                     <div
+                        ref={scrollRef}
                         className="
               min-h-0
               flex-1
@@ -505,62 +605,67 @@ export default function ChatPanel({
             "
                     >
 
-                        {messages.map((item) => (
+                        {messages.map((item) => {
 
-                            <div
-                                key={item.id}
-                                className={`
-                  mb-4
-                  ${item.own
-                                        ? "text-right"
-                                        : "text-left"
-                                    }
-                `}
-                            >
+                            const own =
+                                item.nickname === nickname;
+
+                            return (
 
                                 <div
+                                    key={item.id}
                                     className={`
+                  mb-4
+                  ${own
+                                            ? "text-right"
+                                            : "text-left"
+                                        }
+                `}
+                                >
+
+                                    <div
+                                        className={`
                     mb-1
                     flex
                     items-center
                     gap-2
                     text-[10px]
-                    ${item.own
-                                            ? "justify-end"
-                                            : "justify-start"
-                                        }
+                    ${own
+                                                ? "justify-end"
+                                                : "justify-start"
+                                            }
                   `}
-                                >
-
-                                    <span
-                                        className={
-                                            item.own
-                                                ? "text-white/60"
-                                                : "text-white/40"
-                                        }
                                     >
-                                        {item.nickname}
-                                    </span>
-
-
-                                    {item.own && (
 
                                         <span
-                                            className="
+                                            className={
+                                                own
+                                                    ? "text-white/60"
+                                                    : "text-white/40"
+                                            }
+                                        >
+                                            {item.nickname}
+                                        </span>
+
+
+                                        {own && (
+
+                                            <span
+                                                className="
                         text-[9px]
                         text-white/25
                       "
-                                        >
-                                            You
-                                        </span>
+                                            >
+                                                You
+                                            </span>
 
-                                    )}
+                                        )}
 
-                                </div>
+                                    </div>
 
 
-                                <div
-                                    className={`
+                                    <div
+                                        className={`
                     inline-block
                     max-w-[85%]
                     rounded-2xl
@@ -568,18 +673,27 @@ export default function ChatPanel({
                     py-2
                     text-xs
                     leading-5
-                    ${item.own
-                                            ? "bg-white text-black"
-                                            : "bg-white/[0.08] text-white/75"
-                                        }
+                    ${own
+                                                ? "bg-white text-black"
+                                                : "bg-white/[0.08] text-white/75"
+                                            }
                   `}
-                                >
-                                    {item.text}
+                                    >
+                                        {item.text}
+                                    </div>
+
                                 </div>
 
-                            </div>
+                            );
+                        })}
 
-                        ))}
+                        {messages.length === 0 && (
+
+                            <p className="mt-6 text-center text-[11px] text-white/30">
+                                No messages yet. Say hello 👋
+                            </p>
+
+                        )}
 
                     </div>
 
@@ -672,6 +786,14 @@ export default function ChatPanel({
                         >
                             You are chatting as {nickname}
                         </p>
+
+                        {error && (
+
+                            <p className="mt-1 px-1 text-[9px] text-red-400/80">
+                                {error}
+                            </p>
+
+                        )}
 
                     </form>
 

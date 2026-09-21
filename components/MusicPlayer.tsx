@@ -555,13 +555,13 @@ export default function MusicPlayer() {
     CHAT PANEL
 ============================================ */}
 
-      {/* {isChatOpen && (
+      {isChatOpen && (
         <ChatPanel
           onClose={() =>
             setIsChatOpen(false)
           }
         />
-      )} */}
+      )}
 
       {/* ============================================
           RIGHT MUSIC PANEL
